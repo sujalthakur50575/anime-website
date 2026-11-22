@@ -16,6 +16,10 @@ This is an Anime Website built with React Vite and the Jikan API. It allows user
 - [Jikan API](https://jikan.moe/): A RESTful API for retrieving anime and manga data.
 - Styled-Components
 
+## GitHub Pages
+
+The site is published at [sjdev.me/anime-website](https://sjdev.me/anime-website/). Pushes to `master` build the Vite app and deploy the generated `dist` directory with GitHub Actions.
+
 ## Getting Started
 
 To get started with the Anime Website locally, follow these steps:
