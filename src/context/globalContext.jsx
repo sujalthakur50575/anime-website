@@ -1,130 +1,294 @@
-// This file will contain the data that 
-
-import React, { createContext, useContext, useEffect, useState } from "react";
-import { useReducer } from "react";
+import React, { createContext, useContext, useEffect, useState, useReducer, useCallback } from "react";
 
 const GlobalContext = createContext();
 
-const baseUrl = `https://api.jikan.moe/v4`;
+// Using Kitsu API v4 edge
+const baseUrl = `https://kitsu.io/api/edge`;
 
-
-// actions
+// Action types
 const LOADING = "LOADING";
-const SEARCH = "SEARCH";
 const POPULAR_ANIME = "POPULAR_ANIME";
 const UPCOMING_ANIME = "UPCOMING_ANIME";
 const AIRING_ANIME = "AIRING_ANIME";
-const CHARACTER_IMAGES = "CHARACTER_IMAGES";
+const TOP_CHARACTERS = "TOP_CHARACTERS";
+const SEARCH_ANIME_RESULTS = "SEARCH_ANIME_RESULTS";
+const SEARCH_CHAR_RESULTS = "SEARCH_CHAR_RESULTS";
+const CLEAR_SEARCH = "CLEAR_SEARCH";
+const SET_ERROR = "SET_ERROR";
 
+// Helper to normalize Kitsu Anime items to clean unified shape
+export const normalizeAnime = (item) => {
+    if (!item) return null;
+    const attr = item.attributes || item;
+    const id = item.id || attr.id;
+    const rawRating = parseFloat(attr.averageRating);
+    const score = !isNaN(rawRating) ? (rawRating / 10).toFixed(1) : null;
+    const year = attr.startDate ? attr.startDate.substring(0, 4) : '';
+    const statusMap = {
+        current: 'Currently Airing',
+        finished: 'Finished',
+        upcoming: 'Upcoming',
+        tba: 'TBA',
+        unreleased: 'Unreleased',
+    };
+
+    return {
+        id: String(id),
+        mal_id: String(id), // backwards compatible with routes
+        title: attr.canonicalTitle || attr.titles?.en || attr.titles?.en_jp || 'Untitled',
+        title_english: attr.titles?.en || attr.canonicalTitle || '',
+        title_japanese: attr.titles?.ja_jp || '',
+        score,
+        averageRating: attr.averageRating,
+        rank: attr.ratingRank ? `#${attr.ratingRank}` : null,
+        popularity: attr.popularityRank ? `#${attr.popularityRank}` : null,
+        status: statusMap[attr.status] || attr.status,
+        type: (attr.subtype || attr.showType || 'TV').toUpperCase(),
+        year,
+        episodes: attr.episodeCount,
+        duration: attr.episodeLength ? `${attr.episodeLength} min` : '',
+        synopsis: attr.synopsis || attr.description || '',
+        poster: attr.posterImage?.large || attr.posterImage?.original || attr.posterImage?.medium || '',
+        cover: attr.coverImage?.large || attr.coverImage?.original || '',
+        youtubeVideoId: attr.youtubeVideoId,
+        trailerUrl: attr.youtubeVideoId ? `https://www.youtube.com/embed/${attr.youtubeVideoId}` : null,
+        ratingGuide: attr.ageRatingGuide || attr.ageRating || '',
+        startDate: attr.startDate,
+        endDate: attr.endDate,
+    };
+};
+
+// Helper to normalize Kitsu Character items
+export const normalizeCharacter = (item, role = 'Main') => {
+    if (!item) return null;
+    const attr = item.attributes || item;
+    const id = item.id || attr.id;
+    return {
+        id: String(id),
+        mal_id: String(id),
+        name: attr.canonicalName || attr.name || 'Unknown Character',
+        kanji: attr.names?.ja_jp || '',
+        otherNames: attr.otherNames || [],
+        description: attr.description || '',
+        image: attr.image?.original || attr.image?.large || attr.image?.medium || '',
+        role: role || attr.role || 'Main',
+    };
+};
 
 const reducer = (state, action) => {
     switch (action.type) {
         case LOADING:
-            return { ...state, loading: true };
+            return { ...state, loading: true, error: null };
         case POPULAR_ANIME:
-            return { ...state, popular: action.payload, loading: false };
-        case SEARCH:
-            return { ...state, searchResults: action.payload, loading: false };
+            return { ...state, popular: action.payload || [], loading: false, error: null };
         case UPCOMING_ANIME:
-            return { ...state, upcoming: action.payload, loading: false };
+            return { ...state, upcoming: action.payload || [], loading: false, error: null };
         case AIRING_ANIME:
-            return { ...state, airing: action.payload, loading: false };
-        case CHARACTER_IMAGES:
-            return { ...state, pictures: action.payload, loading: false };
+            return { ...state, airing: action.payload || [], loading: false, error: null };
+        case TOP_CHARACTERS:
+            return { ...state, characters: action.payload || [], loading: false, error: null };
+        case SEARCH_ANIME_RESULTS:
+            return {
+                ...state,
+                searchResults: action.payload || [],
+                searchType: 'anime',
+                isSearch: true,
+                loading: false,
+                error: null,
+            };
+        case SEARCH_CHAR_RESULTS:
+            return {
+                ...state,
+                searchCharResults: action.payload || [],
+                searchType: 'character',
+                isSearch: true,
+                loading: false,
+                error: null,
+            };
+        case CLEAR_SEARCH:
+            return {
+                ...state,
+                searchResults: [],
+                searchCharResults: [],
+                isSearch: false,
+                loading: false,
+                error: null,
+            };
+        case SET_ERROR:
+            return { ...state, error: action.payload, loading: false };
         default:
             return state;
     }
-    return state;
-}
+};
+
+const safeFetch = async (url) => {
+    const res = await fetch(url, {
+        headers: {
+            'Accept': 'application/vnd.api+json',
+            'Content-Type': 'application/vnd.api+json',
+        },
+    });
+    if (!res.ok) {
+        throw new Error(`Kitsu API error: ${res.status} ${res.statusText}`);
+    }
+    return await res.json();
+};
 
 export const GlobalContextProvider = ({ children }) => {
-
-    // Initial State                (I could've used useStates also )
-    const initial = {
+    const initialState = {
         popular: [],
         upcoming: [],
         airing: [],
-        pictures: [],
-        isSearch: false,
+        characters: [],
         searchResults: [],
+        searchCharResults: [],
+        searchType: 'anime',
+        isSearch: false,
         loading: false,
-    }
+        error: null,
+    };
 
+    const [state, dispatch] = useReducer(reducer, initialState);
+    const [search, setSearch] = useState("");
+    const [searchCategory, setSearchCategory] = useState("anime"); // 'anime' | 'character'
 
-    const [state, dispatch] = useReducer(reducer, initial);
-
-    const getPopularAnime = async () => {
-        dispatch({ type: LOADING })
-        const response = await fetch(`${baseUrl}/top/anime?filter=bypopularity`);
-        const data = await response.json();
-        console.log(data.data);
-        dispatch({ type: POPULAR_ANIME, payload: data.data });
-    }
-
-
-    const getUpcomingAnime = async () => {
+    // Fetch popular anime from Kitsu
+    const getPopularAnime = useCallback(async () => {
         dispatch({ type: LOADING });
-        // const response = await fetch(`${baseUrl}/top/anime?filter=upcoming`);
-        const response = await fetch(`https://api.jikan.moe/v4/seasons/upcoming`);
-        const data = await response.json();
-        dispatch({ type: UPCOMING_ANIME, payload: data.data });
-    }
+        try {
+            const data = await safeFetch(`${baseUrl}/anime?sort=-userCount&page[limit]=20`);
+            const normalized = (data.data || []).map(normalizeAnime);
+            dispatch({ type: POPULAR_ANIME, payload: normalized });
+        } catch (err) {
+            console.error("Failed to fetch popular anime:", err);
+            dispatch({ type: SET_ERROR, payload: "Unable to load popular anime from Kitsu API." });
+        }
+    }, []);
 
-    const getAiringAnime = async () => {
-        dispatch({ type: LOADING })
-        const response = await fetch(`${baseUrl}/top/anime?filter=airing`);
-        const data = await response.json();
-        dispatch({ type: AIRING_ANIME, payload: data.data })
-    }
+    // Fetch upcoming anime from Kitsu
+    const getUpcomingAnime = useCallback(async () => {
+        dispatch({ type: LOADING });
+        try {
+            const data = await safeFetch(`${baseUrl}/anime?filter[status]=upcoming&sort=-userCount&page[limit]=20`);
+            const normalized = (data.data || []).map(normalizeAnime);
+            dispatch({ type: UPCOMING_ANIME, payload: normalized });
+        } catch (err) {
+            console.error("Failed to fetch upcoming anime:", err);
+            dispatch({ type: SET_ERROR, payload: "Unable to load upcoming anime from Kitsu API." });
+        }
+    }, []);
 
-    useEffect(() => {
-        getPopularAnime();
-    }, [])
+    // Fetch airing anime from Kitsu
+    const getAiringAnime = useCallback(async () => {
+        dispatch({ type: LOADING });
+        try {
+            const data = await safeFetch(`${baseUrl}/anime?filter[status]=current&sort=-userCount&page[limit]=20`);
+            const normalized = (data.data || []).map(normalizeAnime);
+            dispatch({ type: AIRING_ANIME, payload: normalized });
+        } catch (err) {
+            console.error("Failed to fetch airing anime:", err);
+            dispatch({ type: SET_ERROR, payload: "Unable to load airing anime from Kitsu API." });
+        }
+    }, []);
 
-    const [search, setSearch] = useState('');
+    // Fetch top characters from Kitsu
+    const getTopCharacters = useCallback(async () => {
+        dispatch({ type: LOADING });
+        try {
+            const data = await safeFetch(`${baseUrl}/characters?page[limit]=20`);
+            const normalized = (data.data || []).map((c) => normalizeCharacter(c));
+            dispatch({ type: TOP_CHARACTERS, payload: normalized });
+        } catch (err) {
+            console.error("Failed to fetch top characters:", err);
+            dispatch({ type: SET_ERROR, payload: "Unable to load characters from Kitsu API." });
+        }
+    }, []);
+
+    // Search anime from Kitsu
+    const searchAnime = useCallback(async (query) => {
+        if (!query.trim()) return;
+        dispatch({ type: LOADING });
+        try {
+            const data = await safeFetch(`${baseUrl}/anime?filter[text]=${encodeURIComponent(query)}&page[limit]=20`);
+            const normalized = (data.data || []).map(normalizeAnime);
+            dispatch({ type: SEARCH_ANIME_RESULTS, payload: normalized });
+        } catch (err) {
+            console.error("Failed to search anime:", err);
+            dispatch({ type: SET_ERROR, payload: "Anime search failed. Please try again." });
+        }
+    }, []);
+
+    // Search characters from Kitsu
+    const searchCharacters = useCallback(async (query) => {
+        if (!query.trim()) return;
+        dispatch({ type: LOADING });
+        try {
+            const data = await safeFetch(`${baseUrl}/characters?filter[name]=${encodeURIComponent(query)}&page[limit]=20`);
+            const normalized = (data.data || []).map((c) => normalizeCharacter(c));
+            dispatch({ type: SEARCH_CHAR_RESULTS, payload: normalized });
+        } catch (err) {
+            console.error("Failed to search characters:", err);
+            dispatch({ type: SET_ERROR, payload: "Character search failed. Please try again." });
+        }
+    }, []);
+
+    const clearSearch = useCallback(() => {
+        setSearch("");
+        dispatch({ type: CLEAR_SEARCH });
+    }, []);
 
     const handleSearchChange = (e) => {
-        setSearch(e.target.value);
-        if (e.target.value === "") {
-            state.isSearch = false;
+        const val = e.target.value;
+        setSearch(val);
+        if (val === "" && state.isSearch) {
+            dispatch({ type: CLEAR_SEARCH });
         }
-    }
+    };
 
     const handleSubmitSearch = (e) => {
         e.preventDefault();
-        if (search) {
-            searchAnime(search);
-            state.isSearch = true;
+        const trimmed = search.trim();
+        if (trimmed) {
+            if (searchCategory === 'character') {
+                searchCharacters(trimmed);
+            } else {
+                searchAnime(trimmed);
+            }
         } else {
-            state.isSearch = false;
-            alert("Please enter search term");
+            clearSearch();
         }
-    }
+    };
 
-    const searchAnime = async (anime) => {
-        dispatch({ type: LOADING })
-        const response = await fetch(`https://api.jikan.moe/v4/anime?q=${anime}&order_by=popularity&sort=asc&sfw`);
-        const data = await response.json();
-        dispatch({ type: SEARCH, payload: data.data })
-    }
-
-    const characterImages = async (id) => {
-        dispatch({ type: LOADING })
-        const response = await fetch(`${baseUrl}/characters/${id}/pictures`);
-        const data = await response.json();
-        console.log(data);
-        dispatch({ type: CHARACTER_IMAGES, payload: data.data })
-    }
+    // Initial load
+    useEffect(() => {
+        getPopularAnime();
+    }, [getPopularAnime]);
 
     return (
-        <GlobalContext.Provider value={{
-            ...state, handleSearchChange, handleSubmitSearch, searchAnime, search, getAiringAnime, getPopularAnime, getUpcomingAnime, characterImages
-        }}>
+        <GlobalContext.Provider
+            value={{
+                ...state,
+                search,
+                setSearch,
+                searchCategory,
+                setSearchCategory,
+                handleSearchChange,
+                handleSubmitSearch,
+                searchAnime,
+                searchCharacters,
+                clearSearch,
+                getPopularAnime,
+                getUpcomingAnime,
+                getAiringAnime,
+                getTopCharacters,
+                baseUrl,
+            }}
+        >
             {children}
         </GlobalContext.Provider>
-    )
-}
+    );
+};
 
 export const useGlobalContext = () => {
     return useContext(GlobalContext);
-} 
+};
